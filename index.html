@@ -23,14 +23,15 @@
   }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  body { margin: 0; background: var(--bg) radial-gradient(900px 480px at 18% -8%, rgba(207,155,224,.10), transparent 70%) no-repeat; color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
   button, input { font: inherit; color: inherit; }
   button { cursor: pointer; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
   header { position: sticky; top: 0; z-index: 20; height: var(--hdr); display: flex; align-items: center; gap: 12px; padding: 0 16px; background: rgba(18,18,21,.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
-  header h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
+  header h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; display: flex; align-items: center; gap: 9px; }
+  header h1::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px rgba(207,155,224,.7); }
   header .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
   .seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 8px; overflow: hidden; background: var(--panel); }
   .seg button { border: 0; background: transparent; padding: 7px 12px; font-size: 13px; color: var(--ink-2); white-space: nowrap; }
@@ -64,12 +65,12 @@
 
   /* panel */
   .panel { display: flex; flex-direction: column; gap: 12px; padding-bottom: 8px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
-  .result { display: flex; align-items: center; gap: 12px; }
-  .result .light { width: 14px; height: 14px; border-radius: 50%; background: var(--line-2); flex: none; box-shadow: 0 0 0 4px rgba(255,255,255,.04); }
-  .result.good .light { background: var(--good); box-shadow: 0 0 12px rgba(12,163,12,.6); }
-  .result.bad .light { background: var(--bad); box-shadow: 0 0 12px rgba(208,59,59,.55); }
-  .result .title { font-size: 17px; font-weight: 700; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; box-shadow: inset 0 1px 0 rgba(255,255,255,.03); }
+  .result { display: flex; align-items: center; gap: 14px; }
+  .result .light { width: 16px; height: 16px; border-radius: 50%; background: var(--line-2); flex: none; box-shadow: 0 0 0 5px rgba(255,255,255,.04); }
+  .result.good .light { background: var(--good); box-shadow: 0 0 0 5px rgba(12,163,12,.15), 0 0 14px rgba(12,163,12,.6); }
+  .result.bad .light { background: var(--bad); box-shadow: 0 0 0 5px rgba(208,59,59,.15), 0 0 14px rgba(208,59,59,.55); }
+  .result .title { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
   .result .why { font-size: 12.5px; color: var(--ink-2); }
   .mini { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
   .mini div { background: var(--panel-2); border-radius: 8px; padding: 7px 10px; }
@@ -90,8 +91,8 @@
   input[type=range]::-moz-range-thumb { width: 20px; height: 20px; border-radius: 50%; background: var(--ink); border: 3px solid var(--accent); }
   .btn { border: 1px solid var(--line-2); background: var(--panel-2); color: var(--ink); border-radius: 8px; padding: 10px 14px; font-weight: 600; white-space: nowrap; }
   .btn:hover { border-color: var(--accent-2); }
-  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-size: 15px; }
-  .btn.primary:hover { background: #dcb0ea; }
+  .btn.primary { background: linear-gradient(180deg, #dcb0ea, var(--accent)); border-color: var(--accent); color: var(--accent-ink); font-size: 15px; box-shadow: 0 4px 14px rgba(207,155,224,.25); }
+  .btn.primary:hover { background: #e2bcef; }
   .btn.small { padding: 6px 10px; font-size: 12.5px; font-weight: 500; }
   .btn:disabled { opacity: .45; cursor: default; }
   .actions { display: flex; gap: 8px; margin-top: 14px; }
@@ -107,9 +108,21 @@
 
   /* lower tabs */
   .lower { max-width: 1400px; margin: 18px auto 0; padding: 0 16px 40px; }
-  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
-  .tabs button { border: 0; background: transparent; color: var(--ink-3); padding: 10px 14px; font-weight: 600; font-size: 13.5px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-  .tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
+  .tabs { display: inline-flex; gap: 4px; padding: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; }
+  .tabs button { border: 0; background: transparent; color: var(--ink-3); padding: 7px 14px; font-weight: 600; font-size: 13px; border-radius: 999px; }
+  .tabs button.on { color: var(--accent-ink); background: var(--accent); }
+  .concepts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 14px; }
+  .concept { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
+  .concept h3 { margin: 0 0 4px; font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .concept h3 small { font-size: 11px; color: var(--ink-3); font-weight: 500; }
+  .concept p { margin: 0; font-size: 12.5px; color: var(--ink-2); line-height: 1.55; }
+  .concept .eq { margin-top: 8px; font-family: var(--mono); font-size: 12.5px; color: var(--accent); background: var(--panel-2); padding: 6px 10px; border-radius: 8px; overflow-x: auto; white-space: nowrap; }
+  .section-title { margin: 28px 0 4px; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+  .section-sub { margin: 0; font-size: 12.5px; color: var(--ink-3); }
+  footer { max-width: 1400px; margin: 30px auto 0; padding: 18px 16px 34px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; color: var(--ink-3); }
+  footer .dev { color: var(--ink); font-weight: 600; }
+  footer .dev span { color: var(--ink-3); font-weight: 400; margin-right: 6px; }
+  @media (max-width: 900px) { .concepts { grid-template-columns: 1fr; } .tabs { display: flex; overflow-x: auto; } .tabs button { flex: 1 1 auto; padding: 7px 10px; } }
   .tab { display: none; padding-top: 14px; }
   .tab.on { display: block; }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -229,7 +242,7 @@
         <h2>최적 조건</h2>
         <div class="opt" id="opt"><span class="muted">세부 설정을 고정한 채 물의 양 × 던지는 힘 1,066가지를 모두 시뮬레이션해 가장 안정적으로 서는 조합을 찾습니다. 지도의 칸을 누르면 그 조건으로 바로 던집니다.</span></div>
         <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary small" id="btnApplyOpt" disabled>최적 조건 적용</button><button class="btn small" id="btnSweep">다시 계산</button></div>
-        <p class="muted" style="font-size:12.5px;color:var(--ink-3);margin:14px 0 0">읽는 법: 밝은 칸일수록 착지 각도가 목표에 가깝고, 초록 테두리는 실제로 선 조합입니다. 물이 많을수록 더 센 스냅이 필요한 대각선 띠가 나타납니다.</p>
+        <p class="muted" style="font-size:12.5px;color:var(--ink-3);margin:14px 0 0">밝은 칸일수록 목표 각도에 가깝게 착지하고, 초록 테두리 칸은 실제로 선 조합입니다.</p>
       </section>
     </div>
   </div>
@@ -263,7 +276,26 @@
       </div>
     </section>
   </div>
+
+  <h2 class="section-title" style="text-transform:none;letter-spacing:-0.01em;color:var(--ink);font-size:16px">이 시뮬레이션에 쓰인 물리</h2>
+  <p class="section-sub">병을 던져 세우는 과정에 실제로 계산되는 개념과 식입니다.</p>
+  <div class="concepts">
+    <div class="concept"><h3>관성의 법칙 <small>뉴턴 제1법칙</small></h3><p>손을 떠난 병은 밀어 주는 힘이 없어도 그대로 날아가고, 회전도 그대로 유지하려 합니다.</p><div class="eq">ΣF = 0 → v, ω 일정</div></div>
+    <div class="concept"><h3>가속도의 법칙과 포물선 운동 <small>뉴턴 제2법칙</small></h3><p>공중에서는 중력만 작용해 무게중심이 포물선을 그립니다. 던진 속도와 각도가 높이와 비행 시간을 정합니다.</p><div class="eq">F = ma,  y = v₀sinθ·t − ½gt²,  h = (v₀sinθ)²/2g</div></div>
+    <div class="concept"><h3>무게중심</h3><p>병과 물의 질량이 모인 평균 위치입니다. 물이 적을수록 낮아져서 착지 후 잘 넘어지지 않습니다.</p><div class="eq">c = Σ mᵢzᵢ / Σ mᵢ</div></div>
+    <div class="concept"><h3>토크와 회전 운동</h3><p>손목의 토크가 손과 병을 돌리고, 손가락 스냅의 충격량이 병에 회전을 더합니다.</p><div class="eq">τ = I·α,  J = F·Δt,  Δω = J·r / I</div></div>
+    <div class="concept"><h3>관성모멘트</h3><p>질량이 회전축에서 멀수록 돌리기 어렵습니다. 물이 병 양끝으로 퍼지면 관성모멘트가 커집니다.</p><div class="eq">I = Σ mᵢrᵢ²</div></div>
+    <div class="concept"><h3>각운동량 보존</h3><p>공중에서는 외부 토크가 없어 각운동량이 일정합니다. 관성모멘트가 커진 만큼 회전이 느려져 병이 천천히 내려앉습니다. 보틀 플립의 핵심입니다.</p><div class="eq">L = I·ω = 일정 → ω = L / I</div></div>
+    <div class="concept"><h3>원심 효과</h3><p>도는 병 안에서 물은 무게중심에서 먼 쪽으로 밀려 양끝에 모입니다.</p><div class="eq">a = ω²·(z − c)</div></div>
+    <div class="concept"><h3>충돌, 마찰, 에너지 흡수</h3><p>바닥에 닿으면 반발력과 마찰이 작용하고, 물이 출렁이며 운동 에너지를 흡수해 튕김을 줄입니다.</p><div class="eq">F = −kx − cv,  F_마찰 ≤ μN</div></div>
+    <div class="concept"><h3>안정성과 넘어짐 한계각</h3><p>무게중심이 받침면 안쪽에 있으면 병이 섭니다. 착지 기울기가 한계각보다 작아야 성공합니다.</p><div class="eq">θ_tip = atan(r / c)</div></div>
+  </div>
 </div>
+
+<footer>
+  <div class="dev"><span>개발자</span>낙동고 정중현</div>
+  <div>물리 모델 참고: Dekker et al., Am. J. Phys. 86, 733 (2018)</div>
+</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
