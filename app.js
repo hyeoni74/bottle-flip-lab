@@ -1,0 +1,653 @@
+(function () {
+  'use strict';
+  var BF = BottleFlip, B = BF.BOTTLE, H = BF.HAND;
+  var DEG = Math.PI / 180;
+  var $ = function (s) { return document.querySelector(s); };
+  var lerp = function (a, b, t) { return a + (b - a) * t; };
+  var clamp = function (v, a, b) { return v < a ? a : v > b ? b : v; };
+  var Z_PLANE = -0.03;
+
+  /* ================= parameters ================= */
+  var DEF = BF.defaults();
+  var P = BF.defaults();
+  var mode = 'up', view = '2d';
+  try {
+    var saved = JSON.parse(localStorage.getItem('bottleflip.v4.params') || 'null');
+    if (saved) for (var k in DEF) if (typeof saved[k] === 'number' && isFinite(saved[k])) P[k] = saved[k];
+    P.armAngle = clamp(P.armAngle, 0, 90);
+    if (localStorage.getItem('bottleflip.v4.mode') === 'cap') mode = 'cap';
+    if (localStorage.getItem('bottleflip.v4.view') === '3d') view = '3d';
+  } catch (e) {}
+  function persist() { try { localStorage.setItem('bottleflip.v4.params', JSON.stringify(P)); localStorage.setItem('bottleflip.v4.mode', mode); localStorage.setItem('bottleflip.v4.view', view); } catch (e) {} }
+
+  var SLIDERS = [
+    { key: 'fill', main: true, label: '물의 양', min: 0, max: 1, step: 0.01, fmt: function (v) { return Math.round(v * 100) + ' %'; },
+      sub: function (v) { return Math.round(v * 500) + ' mL · 병 포함 ' + Math.round(v * 500 + 22) + ' g'; } },
+    { key: 'snap', main: true, label: '던지는 힘', min: 0, max: 20, step: 0.1, fmt: function (v) { return v.toFixed(1) + ' N'; }, sub: function () { return snapSub; } },
+    { key: 'armSpeed', main: true, label: '팔 스윙 속도', min: 0, max: 2.5, step: 0.05, fmt: function (v) { return v.toFixed(2) + ' m/s'; }, sub: function () { return armSub; } },
+    { key: 'torque', label: '손목 토크', min: 0.1, max: 2.0, step: 0.01, fmt: function (v) { return v.toFixed(2) + ' N·m'; }, sub: function () { return torqueSub; } },
+    { key: 'flickTime', label: '스윙 시간', min: 0.08, max: 0.30, step: 0.01, fmt: function (v) { return v.toFixed(2) + ' s'; } },
+    { key: 'wristHeight', label: '던지는 높이', min: 0.15, max: 0.80, step: 0.01, fmt: function (v) { return (v * 100).toFixed(0) + ' cm'; },
+      sub: function (v) { return v < 0.32 ? '병 바닥이 바닥에 닿은 채 시작' : '병이 매달린 채 시작'; } },
+    { key: 'armAngle', label: '팔 스윙 방향', min: 0, max: 90, step: 1, fmt: function (v) { return v + '°'; },
+      sub: function (v) { return v > 75 ? '거의 수직으로 올림' : v > 30 ? '앞·위로 올리며 던짐' : '앞으로 밀며 던짐'; } }
+  ];
+  var torqueSub = '', snapSub = '', armSub = '';
+  var sliderEls = {};
+  SLIDERS.forEach(function (s) {
+    var host = $(s.main ? '#mainSliders' : '#advSliders');
+    var wrap = document.createElement('div'); wrap.className = 'ctl';
+    wrap.innerHTML = '<div class="ctl-head"><label for="sl-' + s.key + '">' + s.label + '</label><span class="val" id="val-' + s.key + '"></span></div>' +
+      '<input type="range" id="sl-' + s.key + '" min="' + s.min + '" max="' + s.max + '" step="' + s.step + '"><div class="sub" id="sub-' + s.key + '"></div>';
+    host.appendChild(wrap);
+    var inp = wrap.querySelector('input');
+    sliderEls[s.key] = inp;
+    // while dragging: instant preview of the whole throw (end state + full path); on release: play it
+    inp.addEventListener('input', function () { P[s.key] = parseFloat(inp.value); refreshSlider(s); onParamChange(s.key, false); });
+    inp.addEventListener('change', function () { P[s.key] = parseFloat(inp.value); refreshSlider(s); onParamChange(s.key, true); });
+  });
+  function refreshSlider(s) {
+    var inp = sliderEls[s.key], v = P[s.key];
+    inp.value = v;
+    inp.style.setProperty('--pct', ((v - s.min) / (s.max - s.min) * 100) + '%');
+    $('#val-' + s.key).textContent = s.fmt(v);
+    $('#sub-' + s.key).textContent = s.sub ? s.sub(v) : '';
+  }
+  function refreshAllSliders() { SLIDERS.forEach(refreshSlider); }
+
+  /* ================= simulation state ================= */
+  var sim = null, playT = 0, playing = true, speed = 0.5;
+  var sweepTimer = null;
+  function won(o) { return mode === 'cap' ? (o.outcome === 'inverted' || o.successCap === true) : (o.outcome === 'upright' || o.success === true); }
+  function targetErr(tilt) { return mode === 'cap' ? 180 - tilt : tilt; }
+  function onParamChange(key, play) {
+    persist();
+    runSim(play);
+    if (key !== 'fill' && key !== 'snap') scheduleSweep(); else drawHeatmap();
+  }
+  function runSim(play) {
+    sim = BF.simulate(Object.assign({}, P));
+    lastBanner = null; lastPhase = -1; endHold = 0;
+    if (play === false) { playT = sim.tEnd; playing = false; } else { playT = 0; playing = true; }
+    torqueSub = '손목 ' + Math.round(H.phi0 / DEG) + '° → ' + Math.round(sim.phiRelease / DEG) + '° 회전 · 스윙 ω ' + sim.swingOmega.toFixed(1) + ' rad/s';
+    snapSub = '스냅으로 +' + sim.snapOmega.toFixed(1) + ' rad/s (I₀ = ' + (sim.IRelease * 1e6).toFixed(0) + ' g·cm²)';
+    armSub = '릴리스 속도 ' + sim.releaseSpeed.toFixed(2) + ' m/s · 최고 높이 ' + (sim.apex * 100).toFixed(0) + ' cm';
+    refreshAllSliders();
+    $('#scrub').max = sim.tEnd.toFixed(3);
+    $('#scrubEnd').textContent = sim.tEnd.toFixed(3);
+    updateStats();
+    buildTrail();
+    fit2D();
+    setPlayBtn();
+  }
+
+  /* ================= result & stats ================= */
+  function updateStats() {
+    var s = sim, ok = won(s);
+    var tilt = Math.abs(s.tiltLand), err = targetErr(tilt), tip = mode === 'cap' ? s.tipAngleCap : s.tipAngle;
+    var title, why;
+    if (ok) {
+      title = mode === 'cap' ? '성공 · 뚜껑으로 섰습니다' : '성공 · 병이 섰습니다';
+      why = (err <= tip ? '착지 오차 ' + err.toFixed(1) + '°, 한계각 ' + tip.toFixed(1) + '° 안쪽. ' : '착지 오차 ' + err.toFixed(1) + '°로 한계각을 넘었지만 흔들리다 자리를 잡았습니다. ') +
+        '물이 퍼져 관성모멘트가 ' + (s.ILand / s.IRelease).toFixed(1) + '배가 되면서 회전이 ' + Math.abs(s.omegaLand).toFixed(1) + ' rad/s까지 느려졌습니다.';
+    } else {
+      var landedOther = (mode === 'cap' && s.outcome === 'upright') || (mode === 'up' && s.outcome === 'inverted');
+      if (s.tLand < 0) { title = '실패 · 바닥에 닿지 않음'; why = ''; }
+      else if (landedOther) { title = mode === 'cap' ? '실패 · 바닥으로 섰습니다' : '실패 · 뚜껑으로 섰습니다'; why = mode === 'cap' ? '반 바퀴 더 돌도록 던지는 힘을 키워 보세요.' : '반 바퀴 덜 돌도록 던지는 힘을 줄여 보세요.'; }
+      else {
+        title = '실패 · 넘어졌습니다';
+        if (err > tip) why = (mode === 'cap' ? '거꾸로 착지 오차 ' : '착지 기울기 ') + err.toFixed(1) + '°가 한계각 ' + tip.toFixed(1) + '°를 넘었습니다. 공중 회전 ' + s.rotations.toFixed(2) + '회 — 릴리스 각도까지 더해 ' + (mode === 'cap' ? '반 바퀴' : '한 바퀴') + '가 되도록 던지는 힘을 맞춰 보세요.';
+        else if (Math.abs(s.omegaLand) > 6) why = '기울기는 한계 안이었지만 착지 각속도 ' + Math.abs(s.omegaLand).toFixed(1) + ' rad/s가 너무 컸습니다. 물의 양을 조절해 보세요.';
+        else if (s.vLand > 3.5) why = '착지 속도 ' + s.vLand.toFixed(1) + ' m/s가 커서 튕겼습니다. 팔 스윙 속도를 낮춰 보세요.';
+        else why = '착지 후 최대 ' + s.maxTiltAfterLand.toFixed(0) + '°까지 흔들리다 넘어갔습니다.';
+      }
+    }
+    $('#result').className = 'result ' + (ok ? 'good' : 'bad');
+    $('#resTitle').textContent = title; $('#resWhy').textContent = why;
+    var mini = [
+      ['공중 회전', isNaN(s.rotations) ? '–' : s.rotations.toFixed(2), '회'],
+      ['착지 기울기', s.tLand > 0 ? tilt.toFixed(0) : '–', '°'],
+      ['최고 높이', (s.apex * 100).toFixed(0), 'cm']
+    ];
+    $('#mini').innerHTML = mini.map(function (it) { return '<div><div class="k">' + it[0] + '</div><div class="v">' + it[1] + '<small>' + it[2] + '</small></div></div>'; }).join('');
+    var items = [
+      ['릴리스 각속도', s.omegaRelease.toFixed(1), 'rad/s'],
+      ['릴리스 속도', s.releaseSpeed.toFixed(2), 'm/s'],
+      ['비행 시간', isNaN(s.flightTime) ? '–' : s.flightTime.toFixed(2), 's'],
+      ['공중 회전', isNaN(s.rotations) ? '–' : s.rotations.toFixed(2), '회'],
+      ['착지 기울기', s.tLand > 0 ? tilt.toFixed(1) : '–', '°'],
+      ['착지 각속도', s.tLand > 0 ? Math.abs(s.omegaLand).toFixed(1) : '–', 'rad/s'],
+      ['최고 높이', (s.apex * 100).toFixed(0), 'cm'],
+      ['착지 거리', s.tLand > 0 ? (s.xLand * 100).toFixed(0) : '–', 'cm'],
+      ['관성모멘트 증가', s.tLand > 0 ? (s.ILand / s.IRelease).toFixed(2) : '–', '×']
+    ];
+    $('#stats').innerHTML = items.map(function (it) { return '<div class="stat"><div class="k">' + it[0] + '</div><div class="v">' + it[1] + '<small>' + it[2] + '</small></div></div>'; }).join('');
+  }
+
+  /* ================= frame interpolation ================= */
+  var cur = { t: 0, phase: 0, phi: 0, x: 0, y: 0, th: 0, om: 0, I: 1, z: [], tilt: 0, com: 0, Wx: 0, Wy: 0 };
+  function frameAt(t) {
+    var fr = sim.frames, lo = 0, hi = fr.length - 1;
+    if (t <= fr[0].t) { copyFrame(fr[0], fr[0], 0); return; }
+    if (t >= fr[hi].t) { copyFrame(fr[hi], fr[hi], 0); return; }
+    while (hi - lo > 1) { var mid = (lo + hi) >> 1; if (fr[mid].t <= t) lo = mid; else hi = mid; }
+    var a = fr[lo], b = fr[hi], u = (t - a.t) / Math.max(1e-9, b.t - a.t);
+    copyFrame(a, b, u);
+  }
+  function copyFrame(a, b, u) {
+    cur.t = lerp(a.t, b.t, u); cur.phase = u < 0.5 ? a.phase : b.phase;
+    cur.x = lerp(a.x, b.x, u); cur.y = lerp(a.y, b.y, u); cur.th = lerp(a.th, b.th, u);
+    cur.om = lerp(a.om, b.om, u); cur.I = lerp(a.I, b.I, u); cur.Wx = lerp(a.Wx, b.Wx, u); cur.Wy = lerp(a.Wy, b.Wy, u);
+    cur.z.length = a.z.length; var s = B.mEmpty * B.zb;
+    for (var i = 0; i < a.z.length; i++) { cur.z[i] = lerp(a.z[i], b.z[i], u); s += (sim.massWater / sim.N) * cur.z[i]; }
+    cur.com = s / sim.massTotal;
+    cur.tilt = BF.wrapPi(cur.th);
+  }
+  function handPhiAt(t) {
+    if (t <= sim.tRelease) return frameAtPhi(t);
+    var tf = 0.06, dt = t - sim.tRelease;
+    return Math.min(H.phiStop, sim.phiRelease + sim.phidRelease * tf * (1 - Math.exp(-dt / tf)));
+  }
+  function frameAtPhi(t) { var fr = sim.frames, lo = 0, hi = fr.length - 1; while (hi - lo > 1) { var m = (lo + hi) >> 1; if (fr[m].t <= t) lo = m; else hi = m; } var a = fr[lo], b = fr[hi]; if (b.phase !== 0) return a.phi; var u = (t - a.t) / Math.max(1e-9, b.t - a.t); return lerp(a.phi, b.phi, u); }
+  function comOf(f) {
+    var s = B.mEmpty * B.zb;
+    for (var k = 0; k < f.z.length; k++) s += (sim.massWater / sim.N) * f.z[k];
+    var c = s / sim.massTotal;
+    return [f.x - c * Math.sin(f.th), f.y + c * Math.cos(f.th)];
+  }
+  function trailCount(t) { var fr = sim.frames, lo = 0, hi = Math.min(fr.length, trailMax) - 1; while (hi - lo > 1) { var m = (lo + hi) >> 1; if (fr[m].t <= t) lo = m; else hi = m; } return lo + 1; }
+
+  /* ================= three.js scene ================= */
+  var glOk = typeof THREE !== 'undefined';
+  var canvas = $('#gl'), renderer, scene, camera;
+  var bottleGroup, waterMeshes = [], handGroup, armGroup, fingers = [], thumb, trailLine, trailPos, trailMax = 2600, setHandOpen = function () {};
+  var cam = { az: 0.38, el: 0.16, dist: 1.35, tx: 0.25, ty: 0.26, tz: -0.02 };
+  var camTarget = null, tmpV = null;
+  if (glOk) {
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.outputEncoding = THREE.sRGBEncoding; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.05;
+      if (!renderer.getContext()) glOk = false;
+    } catch (e) { glOk = false; }
+  }
+  if (glOk) {
+    camTarget = new THREE.Vector3(cam.tx, cam.ty, cam.tz); tmpV = new THREE.Vector3();
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x131316);
+    scene.fog = new THREE.Fog(0x131316, 2.5, 7);
+    camera = new THREE.PerspectiveCamera(38, 1, 0.02, 40);
+    var ground = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), new THREE.MeshStandardMaterial({ color: 0x1d1d22, roughness: 1, metalness: 0 }));
+    ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+    var gridHelper = new THREE.GridHelper(4, 40, 0x2f2f38, 0x25252c); gridHelper.position.y = 0.0015; scene.add(gridHelper);
+    scene.add(new THREE.HemisphereLight(0xa4afcc, 0x17171a, 0.6));
+    var key = new THREE.DirectionalLight(0xfff1e4, 1.15);
+    key.position.set(1.3, 2.6, 1.6); key.castShadow = true; key.shadow.mapSize.set(2048, 2048);
+    key.shadow.camera.left = -2.4; key.shadow.camera.right = 2.4; key.shadow.camera.top = 2.4; key.shadow.camera.bottom = -2.4;
+    key.shadow.camera.near = 0.5; key.shadow.camera.far = 8; key.shadow.radius = 3; key.shadow.bias = -0.0005;
+    scene.add(key);
+    var rim = new THREE.DirectionalLight(0x8fb4ff, 0.4); rim.position.set(-2, 1.4, -2.2); scene.add(rim);
+
+    bottleGroup = new THREE.Group(); scene.add(bottleGroup);
+    var prof = [[0, 0], [0.020, 0], [0.027, 0.003], [0.0295, 0.010], [0.0295, 0.038], [0.0275, 0.044], [0.0295, 0.050], [0.0295, 0.074], [0.0275, 0.080], [0.0295, 0.086], [0.0295, 0.120], [0.0283, 0.133], [0.0295, 0.146], [0.0295, 0.165], [0.026, 0.176], [0.019, 0.186], [0.0135, 0.194], [0.0135, 0.206]];
+    var petMat = new THREE.MeshPhysicalMaterial({ color: 0xe6f0ff, transparent: true, opacity: 0.24, roughness: 0.12, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.08, side: THREE.DoubleSide, depthWrite: false });
+    var body = new THREE.Mesh(new THREE.LatheGeometry(prof.map(function (p) { return new THREE.Vector2(p[0], p[1]); }), 56), petMat);
+    body.castShadow = true; body.renderOrder = 2; bottleGroup.add(body);
+    var capProf = [[0, 0.205], [0.0148, 0.205], [0.0148, 0.223], [0.0135, 0.225], [0, 0.225]];
+    var cap = new THREE.Mesh(new THREE.LatheGeometry(capProf.map(function (p) { return new THREE.Vector2(p[0], p[1]); }), 40), new THREE.MeshStandardMaterial({ color: 0xcf9be0, roughness: 0.55 }));
+    cap.castShadow = true; bottleGroup.add(cap);
+    var ring = new THREE.Mesh(new THREE.TorusGeometry(0.0142, 0.0018, 8, 32), new THREE.MeshStandardMaterial({ color: 0xcf9be0, roughness: 0.6 }));
+    ring.rotation.x = Math.PI / 2; ring.position.y = 0.2005; bottleGroup.add(ring);
+    var waterMat = new THREE.MeshPhysicalMaterial({ color: 0x5fb0ff, transparent: true, opacity: 0.58, roughness: 0.05, metalness: 0, clearcoat: 0.6, depthWrite: false });
+    for (var wi = 0; wi < BF.NUM.N; wi++) { var wm = new THREE.Mesh(new THREE.CylinderGeometry(0.0272, 0.0272, 1, 36), waterMat); wm.renderOrder = 1; wm.visible = false; bottleGroup.add(wm); waterMeshes.push(wm); }
+
+    var skin = new THREE.MeshStandardMaterial({ color: 0xe4b99b, roughness: 0.72, metalness: 0 });
+    var skinDark = new THREE.MeshStandardMaterial({ color: 0xd9ab8c, roughness: 0.78 });
+    var UP = new THREE.Vector3(0, 1, 0);
+    var makeChain = function (pts, radii, mat, parent) {
+      var segs = [], joints = [], i;
+      for (i = 0; i < pts.length - 1; i++) { var m = new THREE.Mesh(new THREE.CylinderGeometry(radii[i + 1], radii[i], 1, 18, 1), mat); m.castShadow = true; parent.add(m); segs.push(m); }
+      for (i = 0; i < pts.length; i++) { var sph = new THREE.Mesh(new THREE.SphereGeometry(radii[i], 18, 12), mat); sph.castShadow = true; parent.add(sph); joints.push(sph); }
+      var a = new THREE.Vector3(), b = new THREE.Vector3(), d = new THREE.Vector3();
+      var update = function (Pn) {
+        for (var j = 0; j < segs.length; j++) {
+          a.set(Pn[j][0], Pn[j][1], Pn[j][2]); b.set(Pn[j + 1][0], Pn[j + 1][1], Pn[j + 1][2]);
+          d.subVectors(b, a); var L = d.length();
+          segs[j].position.copy(a).addScaledVector(d, 0.5); segs[j].scale.set(1, L, 1); segs[j].quaternion.setFromUnitVectors(UP, d.normalize());
+        }
+        for (j = 0; j < joints.length; j++) joints[j].position.set(Pn[j][0], Pn[j][1], Pn[j][2]);
+      };
+      update(pts);
+      return { update: update };
+    };
+    armGroup = new THREE.Group(); scene.add(armGroup);
+    makeChain([[0, 0, 0], [-0.21, 0.19, 0.02], [-0.27, 0.36, -0.08]], [0.031, 0.046, 0.054], skinDark, armGroup);
+    handGroup = new THREE.Group(); scene.add(handGroup);
+    var palm = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), skin);
+    palm.scale.set(0.043, 0.052, 0.018); palm.position.set(0, -0.052, 0); palm.castShadow = true; handGroup.add(palm);
+    var wristBlob = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), skin);
+    wristBlob.scale.set(0.031, 0.026, 0.024); wristBlob.position.set(0, -0.006, 0); wristBlob.castShadow = true; handGroup.add(wristBlob);
+    var FX = [0.030, 0.011, -0.009, -0.028];
+    var POSES = {
+      grip: [
+        [[0.030, -0.092, 0.002], [0.028, -0.122, -0.014], [0.024, -0.121, -0.035], [0.017, -0.109, -0.046]],
+        [[0.011, -0.094, 0.002], [0.010, -0.125, -0.016], [0.004, -0.122, -0.037], [0.000, -0.110, -0.047]],
+        [[-0.009, -0.092, 0.002], [-0.010, -0.115, -0.014], [-0.012, -0.108, -0.036], [-0.014, -0.092, -0.042]],
+        [[-0.028, -0.088, 0.002], [-0.029, -0.108, -0.013], [-0.031, -0.102, -0.032], [-0.032, -0.089, -0.037]]
+      ],
+      open: FX.map(function (x, i) { var L = i === 3 ? 0.85 : i === 2 ? 0.95 : 1; return [[x, -0.092, 0.002], [x, -0.092 - 0.032 * L, -0.004], [x, -0.092 - 0.058 * L, -0.010], [x, -0.092 - 0.078 * L, -0.016]]; }),
+      thumbGrip: [[-0.040, -0.040, -0.006], [-0.031, -0.082, -0.024], [-0.018, -0.104, -0.035]],
+      thumbOpen: [[-0.040, -0.040, -0.006], [-0.053, -0.078, -0.012], [-0.062, -0.112, -0.016]]
+    };
+    var FR = [[0.0092, 0.0084, 0.0077, 0.0070], [0.0094, 0.0086, 0.0078, 0.0071], [0.0088, 0.0080, 0.0073, 0.0066], [0.0078, 0.0071, 0.0065, 0.0059]];
+    for (var fi = 0; fi < 4; fi++) fingers.push(makeChain(POSES.grip[fi], FR[fi], skin, handGroup));
+    thumb = makeChain(POSES.thumbGrip, [0.0125, 0.0105, 0.0088], skin, handGroup);
+    var tmpPose = [];
+    setHandOpen = function (o) {
+      for (var f = 0; f < 4; f++) {
+        var g = POSES.grip[f], op = POSES.open[f]; tmpPose.length = 0;
+        for (var j = 0; j < 4; j++) tmpPose.push([lerp(g[j][0], op[j][0], o), lerp(g[j][1], op[j][1], o), lerp(g[j][2], op[j][2], o)]);
+        fingers[f].update(tmpPose);
+      }
+      tmpPose.length = 0;
+      for (j = 0; j < 3; j++) tmpPose.push([lerp(POSES.thumbGrip[j][0], POSES.thumbOpen[j][0], o), lerp(POSES.thumbGrip[j][1], POSES.thumbOpen[j][1], o), lerp(POSES.thumbGrip[j][2], POSES.thumbOpen[j][2], o)]);
+      thumb.update(tmpPose);
+    };
+    setHandOpen(0);
+
+    trailPos = new Float32Array(trailMax * 3);
+    var trailGeo = new THREE.BufferGeometry();
+    trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPos, 3)); trailGeo.setDrawRange(0, 0);
+    trailLine = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color: 0xcf9be0, transparent: true, opacity: 0.75 }));
+    trailLine.frustumCulled = false; scene.add(trailLine);
+
+    var drag = null, pinch0 = 0;
+    canvas.addEventListener('pointerdown', function (e) { drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); });
+    canvas.addEventListener('pointermove', function (e) { if (!drag) return; cam.az -= (e.clientX - drag.x) * 0.006; cam.el = clamp(cam.el + (e.clientY - drag.y) * 0.006, -0.05, 1.3); drag = { x: e.clientX, y: e.clientY }; });
+    canvas.addEventListener('pointerup', function () { drag = null; });
+    canvas.addEventListener('pointercancel', function () { drag = null; });
+    canvas.addEventListener('wheel', function (e) { e.preventDefault(); cam.dist = clamp(cam.dist * Math.exp(e.deltaY * 0.0012), 0.45, 5); }, { passive: false });
+    canvas.addEventListener('touchstart', function (e) { if (e.touches.length === 2) pinch0 = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); }, { passive: true });
+    canvas.addEventListener('touchmove', function (e) { if (e.touches.length === 2 && pinch0) { var d2 = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); cam.dist = clamp(cam.dist * pinch0 / d2, 0.45, 5); pinch0 = d2; } }, { passive: true });
+  }
+  function resize3D() {
+    if (!glOk) return;
+    var w = canvas.clientWidth, h = canvas.clientHeight; if (!w || !h) return;
+    renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+  }
+  function buildTrail() {
+    if (!glOk) return;
+    var fr = sim.frames, n = Math.min(fr.length, trailMax), xMax = 0.6, yMax = 0.5;
+    for (var i = 0; i < n; i++) {
+      var c = comOf(fr[i]); trailPos[i * 3] = c[0]; trailPos[i * 3 + 1] = c[1]; trailPos[i * 3 + 2] = Z_PLANE;
+      if (c[0] > xMax) xMax = c[0]; if (c[1] > yMax) yMax = c[1];
+    }
+    trailLine.geometry.attributes.position.needsUpdate = true;
+    var stage = $('#stage'), span = xMax + 0.55, aspect = Math.max(0.5, stage.clientWidth / Math.max(1, stage.clientHeight));
+    cam.tx = (xMax - 0.3) / 2; cam.ty = Math.min(0.45, yMax * 0.5 + 0.08);
+    cam.dist = clamp(Math.max(span / (0.69 * aspect), (yMax + 0.35) / 0.69) * 1.05, 1.2, 4);
+  }
+  function render3D(phi, openAmt) {
+    bottleGroup.position.set(cur.x, cur.y, Z_PLANE); bottleGroup.rotation.z = cur.th;
+    for (var i = 0; i < waterMeshes.length; i++) {
+      var wm = waterMeshes[i];
+      if (i < sim.N) { wm.visible = true; wm.position.y = cur.z[i]; wm.scale.y = sim.lumpLen * 1.08; } else wm.visible = false;
+    }
+    handGroup.position.set(cur.Wx, cur.Wy, 0); handGroup.rotation.z = phi;
+    armGroup.position.set(cur.Wx, cur.Wy, 0);
+    setHandOpen(openAmt);
+    trailLine.geometry.setDrawRange(0, trailCount(playT));
+    camTarget.lerp(tmpV.set(cam.tx, cam.ty, cam.tz), 0.08);
+    camera.position.set(camTarget.x + cam.dist * Math.sin(cam.az) * Math.cos(cam.el), camTarget.y + cam.dist * Math.sin(cam.el), camTarget.z + cam.dist * Math.cos(cam.az) * Math.cos(cam.el));
+    camera.lookAt(camTarget);
+    renderer.render(scene, camera);
+  }
+
+  /* ================= 2D side view ================= */
+  var c2d = $('#c2d'), ctx2 = c2d.getContext('2d');
+  var v2 = { xMin: -0.5, xMax: 1.3, yMax: 0.9 };
+  function fit2D() {
+    var xMin = -0.45, xMax = 0.9, yMax = 0.6;
+    for (var i = 0; i < sim.frames.length; i += 4) {
+      var c = comOf(sim.frames[i]);
+      if (c[0] + 0.25 > xMax) xMax = c[0] + 0.25; if (c[0] - 0.3 < xMin) xMin = c[0] - 0.3; if (c[1] + 0.25 > yMax) yMax = c[1] + 0.25;
+    }
+    v2.xMin = xMin; v2.xMax = xMax; v2.yMax = yMax;
+  }
+  function render2D(phi) {
+    var W = c2d.clientWidth, Hc = c2d.clientHeight, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (!W || !Hc) return;
+    if (c2d.width !== Math.round(W * dpr) || c2d.height !== Math.round(Hc * dpr)) { c2d.width = Math.round(W * dpr); c2d.height = Math.round(Hc * dpr); }
+    var g = ctx2; g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = '#131316'; g.fillRect(0, 0, W, Hc);
+    var S = Math.min((W - 40) / (v2.xMax - v2.xMin), (Hc - 70) / v2.yMax);
+    var ox = 20 - v2.xMin * S, oy = Hc - 36;
+    var sx = function (x) { return ox + x * S; }, sy = function (y) { return oy - y * S; };
+    g.fillStyle = '#1b1b20'; g.fillRect(0, oy, W, Hc - oy);
+    g.strokeStyle = '#34343e'; g.lineWidth = 1; g.beginPath(); g.moveTo(0, oy + 0.5); g.lineTo(W, oy + 0.5); g.stroke();
+    g.fillStyle = '#5a5a68'; g.font = '11px "IBM Plex Mono", monospace'; g.textAlign = 'center'; g.textBaseline = 'top';
+    for (var xm = Math.ceil(v2.xMin * 10) / 10; xm <= v2.xMax; xm += 0.1) {
+      var big = Math.abs(xm * 2 - Math.round(xm * 2)) < 1e-6;
+      g.strokeStyle = big ? '#3a3a46' : '#26262d'; g.beginPath(); g.moveTo(sx(xm) + 0.5, oy); g.lineTo(sx(xm) + 0.5, oy + (big ? 8 : 4)); g.stroke();
+      if (big) g.fillText((xm * 100).toFixed(0) + ' cm', sx(xm), oy + 12);
+    }
+    var com = [cur.x - cur.com * Math.sin(cur.th), cur.y + cur.com * Math.cos(cur.th)];
+    g.fillStyle = 'rgba(0,0,0,0.35)'; g.beginPath(); g.ellipse(sx(com[0]), oy, Math.max(6, 0.05 * S), Math.max(2, 0.012 * S), 0, 0, Math.PI * 2); g.fill();
+    var n = trailCount(playT), fr = sim.frames, i, c;
+    g.strokeStyle = 'rgba(207,155,224,0.8)'; g.lineWidth = 1.5; g.beginPath();
+    for (i = 0; i < n; i++) { c = comOf(fr[i]); if (i === 0) g.moveTo(sx(c[0]), sy(c[1])); else g.lineTo(sx(c[0]), sy(c[1])); }
+    g.stroke();
+    var Wx = sx(cur.Wx), Wy = sy(cur.Wy);
+    var Ex = sx(cur.Wx - 0.21), Ey = sy(cur.Wy + 0.19), Ux = sx(cur.Wx - 0.30), Uy = sy(cur.Wy + 0.46);
+    g.lineCap = 'round'; g.lineJoin = 'round';
+    g.strokeStyle = '#d9ab8c'; g.lineWidth = Math.max(6, 0.10 * S); g.beginPath(); g.moveTo(Ux, Uy); g.lineTo(Ex, Ey); g.stroke();
+    g.lineWidth = Math.max(5, 0.075 * S); g.beginPath(); g.moveTo(Ex, Ey); g.lineTo(Wx, Wy); g.stroke();
+    var hx = sx(cur.Wx + H.len * Math.sin(phi)), hy = sy(cur.Wy - H.len * Math.cos(phi));
+    g.strokeStyle = '#e4b99b'; g.lineWidth = Math.max(5, 0.05 * S); g.beginPath(); g.moveTo(Wx, Wy); g.lineTo(lerp(Wx, hx, 0.75), lerp(Wy, hy, 0.75)); g.stroke();
+    g.lineWidth = Math.max(3, 0.022 * S); g.beginPath(); g.moveTo(lerp(Wx, hx, 0.7), lerp(Wy, hy, 0.7)); g.lineTo(hx, hy); g.stroke();
+    g.save(); g.translate(sx(cur.x), sy(cur.y)); g.rotate(-cur.th);
+    var r = B.r * S, L = B.Ltot * S, rc = B.rCap * S;
+    g.fillStyle = 'rgba(110,165,255,0.06)'; g.strokeStyle = 'rgba(210,225,255,0.85)'; g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(-r, 0); g.lineTo(r, 0); g.lineTo(r, -0.165 * S); g.quadraticCurveTo(r, -0.19 * S, 0.0135 * S, -0.196 * S); g.lineTo(0.0135 * S, -0.206 * S); g.lineTo(-0.0135 * S, -0.206 * S); g.lineTo(-0.0135 * S, -0.196 * S); g.quadraticCurveTo(-r, -0.19 * S, -r, -0.165 * S); g.closePath(); g.fill(); g.stroke();
+    g.fillStyle = 'rgba(111,179,255,0.55)';
+    for (i = 0; i < sim.N; i++) { var zl = cur.z[i] * S, hl = sim.lumpLen * 1.08 * S; g.fillRect(-r + 1.5, -(zl + hl / 2), 2 * r - 3, hl); }
+    g.fillStyle = '#cf9be0'; g.fillRect(-rc, -L, 2 * rc, 0.02 * S);
+    g.restore();
+  }
+  function setView(v) {
+    if (v === '3d' && !glOk) v = '2d';
+    view = v;
+    canvas.hidden = view !== '3d'; c2d.hidden = view !== '2d';
+    Array.prototype.forEach.call($('#viewSeg').children, function (c) { c.classList.toggle('on', c.dataset.v === view); c.disabled = (c.dataset.v === '3d' && !glOk); });
+    if (view === '3d') resize3D();
+    persist();
+  }
+  $('#viewSeg').addEventListener('click', function (e) { var b = e.target.closest('button'); if (!b || b.disabled) return; setView(b.dataset.v); });
+  new ResizeObserver(function () { resize3D(); }).observe($('#stage'));
+
+  /* ================= render loop ================= */
+  var lastTs = 0, endHold = 0;
+  function tick(ts) {
+    requestAnimationFrame(tick);
+    var dtReal = Math.min(0.05, (ts - lastTs) / 1000 || 0); lastTs = ts;
+    if (!sim) return;
+    if (playing) {
+      playT += dtReal * speed;
+      if (playT >= sim.tEnd) { playT = sim.tEnd; endHold += dtReal; if (endHold > 1.5) { playT = 0; endHold = 0; } }
+      else endHold = 0;
+    }
+    frameAt(playT);
+    var phi = handPhiAt(playT);
+    var openAmt = clamp((playT - sim.tRelease) / 0.08, 0, 1); openAmt = openAmt * openAmt * (3 - 2 * openAmt);
+    if (view === '3d' && glOk) render3D(phi, openAmt); else render2D(phi);
+    updateHud();
+    if (activeTab === 'graph') drawTimeline();
+  }
+  requestAnimationFrame(tick);
+
+  /* ================= HUD ================= */
+  var hud = { t: $('#hudT'), phase: $('#hudPhase'), tilt: $('#hudTilt'), om: $('#hudOm'), I: $('#hudI'), scrub: $('#scrub'), scrubT: $('#scrubT'), banner: $('#banner') };
+  var PH = ['손목 회전', '스냅 · 비행', '착지'];
+  var lastPhase = -1, lastBanner = null, scrubbing = false;
+  function updateHud() {
+    hud.t.textContent = playT.toFixed(3);
+    hud.tilt.textContent = (cur.tilt / DEG).toFixed(1) + '°';
+    hud.om.textContent = cur.om.toFixed(1) + ' rad/s';
+    hud.I.textContent = (cur.I / sim.IRelease).toFixed(2) + '×';
+    if (!scrubbing) hud.scrub.value = playT;
+    hud.scrubT.textContent = playT.toFixed(3);
+    if (cur.phase !== lastPhase) { lastPhase = cur.phase; hud.phase.textContent = PH[cur.phase]; }
+    var done = playT >= sim.tEnd - 0.001;
+    var state = done ? (won(sim) ? 'good' : 'bad') : 'idle';
+    if (state !== lastBanner) {
+      lastBanner = state;
+      if (state === 'idle') hud.banner.className = 'banner';
+      else if (state === 'good') { hud.banner.className = 'banner show good'; hud.banner.innerHTML = (mode === 'cap' ? '성공 — 뚜껑으로 섰습니다' : '성공 — 병이 섰습니다') + '<small>착지 오차 ' + targetErr(Math.abs(sim.tiltLand)).toFixed(1) + '° · 공중 회전 ' + sim.rotations.toFixed(2) + '회</small>'; }
+      else { hud.banner.className = 'banner show bad'; hud.banner.innerHTML = '실패 — ' + (sim.outcome === 'upright' ? '바닥으로 섰습니다' : sim.outcome === 'inverted' ? '뚜껑으로 섰습니다' : '넘어졌습니다') + '<small>착지 오차 ' + (sim.tLand > 0 ? targetErr(Math.abs(sim.tiltLand)).toFixed(1) + '°' : '–') + ' · 공중 회전 ' + (isNaN(sim.rotations) ? '–' : sim.rotations.toFixed(2)) + '회</small>'; }
+    }
+  }
+
+  /* ================= transport & controls ================= */
+  function setPlayBtn() { $('#btnPlay').textContent = playing ? '⏸' : '▶'; }
+  function replay() { playT = 0; playing = true; endHold = 0; setPlayBtn(); }
+  $('#btnPlay').addEventListener('click', function () { if (!playing && playT >= sim.tEnd - 0.001) playT = 0; playing = !playing; endHold = 0; setPlayBtn(); });
+  $('#btnRestart').addEventListener('click', replay);
+  $('#btnThrow').addEventListener('click', function () { runSim(true); });
+  $('#btnReset').addEventListener('click', function () { P = BF.defaults(); refreshAllSliders(); persist(); runSim(true); scheduleSweep(); });
+  $('#scrub').addEventListener('input', function () { scrubbing = true; playing = false; playT = parseFloat(this.value); setPlayBtn(); });
+  $('#scrub').addEventListener('change', function () { scrubbing = false; });
+  $('#speedSeg').addEventListener('click', function (e) { var b = e.target.closest('button'); if (!b) return; speed = parseFloat(b.dataset.s); Array.prototype.forEach.call(this.children, function (c) { c.classList.toggle('on', c === b); }); });
+  document.addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+    if (e.code === 'Space') { e.preventDefault(); $('#btnPlay').click(); }
+    if (e.key === 'r' || e.key === 'R') replay();
+  });
+  var PRESETS = {
+    good:  { fill: 0.30, snap: 7.5, torque: 0.6, flickTime: 0.15, wristHeight: 0.30, armSpeed: 1.2, armAngle: 70 },
+    empty: { fill: 0.00, snap: 7.5, torque: 0.6, flickTime: 0.15, wristHeight: 0.30, armSpeed: 1.2, armAngle: 70 },
+    full:  { fill: 1.00, snap: 7.5, torque: 0.6, flickTime: 0.15, wristHeight: 0.30, armSpeed: 1.2, armAngle: 70 },
+    cap:   { fill: 0.96, snap: 18,  torque: 0.6, flickTime: 0.15, wristHeight: 0.30, armSpeed: 1.2, armAngle: 70 }
+  };
+  $('.chips').addEventListener('click', function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    var pr = PRESETS[b.dataset.preset]; for (var k in pr) P[k] = pr[k];
+    if (b.dataset.preset === 'cap') setMode('cap');
+    refreshAllSliders(); persist(); runSim(true); scheduleSweep();
+  });
+  function setMode(m) {
+    mode = m;
+    Array.prototype.forEach.call($('#modeSeg').children, function (c) { c.classList.toggle('on', c.dataset.m === m); });
+    persist();
+    if (sim) { updateStats(); lastBanner = null; }
+    if (grid && !sweeping) { optimal = null; finishSweep(); }
+  }
+  $('#modeSeg').addEventListener('click', function (e) { var b = e.target.closest('button'); if (!b) return; setMode(b.dataset.m); });
+
+  /* ================= tabs ================= */
+  var activeTab = 'map';
+  $('#tabs').addEventListener('click', function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    activeTab = b.dataset.t;
+    Array.prototype.forEach.call(this.children, function (c) { c.classList.toggle('on', c === b); });
+    ['map', 'graph', 'model'].forEach(function (t) { $('#tab-' + t).classList.toggle('on', t === activeTab); });
+    if (activeTab === 'map') drawHeatmap();
+  });
+
+  /* ================= timeline chart ================= */
+  var tl = $('#timeline'), tlCtx = tl.getContext('2d');
+  var C = { ink: '#ededf2', ink2: '#a8a8b6', ink3: '#6d6d7c', grid: '#2c2c34', base: '#3a3a46', s1: '#3987e5', s2: '#d95926', accent: '#cf9be0' };
+  function drawTimeline() {
+    var W = tl.clientWidth, Hc = tl.clientHeight, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (!W || !Hc) return;
+    if (tl.width !== Math.round(W * dpr) || tl.height !== Math.round(Hc * dpr)) { tl.width = Math.round(W * dpr); tl.height = Math.round(Hc * dpr); }
+    var ctx = tlCtx; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, Hc);
+    var fr = sim.frames, tEnd = sim.tEnd, L = 44, R = 10, T = 6, gap = 16;
+    var strips = [
+      { name: '각속도 ω', unit: 'rad/s', get: function (f) { return f.om; }, col: C.s1 },
+      { name: '기울기 (0° = 바로 섬)', unit: '°', get: function (f) { return f.tilt / DEG; }, col: C.s2, fixed: [-180, 180], wrap: true }
+    ];
+    var sh = (Hc - T - 18 - gap) / 2;
+    var xOf = function (t) { return L + (W - L - R) * t / tEnd; };
+    ctx.font = '11px "IBM Plex Mono", monospace';
+    strips.forEach(function (s, si) {
+      var y0 = T + si * (sh + gap), y1 = y0 + sh, mn = Infinity, mx = -Infinity, i, v;
+      if (s.fixed) { mn = s.fixed[0]; mx = s.fixed[1]; }
+      else { for (i = 0; i < fr.length; i++) { v = s.get(fr[i]); if (v < mn) mn = v; if (v > mx) mx = v; } if (mx - mn < 1e-6) mx = mn + 1; var pad = (mx - mn) * 0.08; mn -= pad; mx += pad; }
+      var yOf = function (val) { return y1 - (val - mn) / (mx - mn) * sh; };
+      ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+      [mn, (mn + mx) / 2, mx].forEach(function (gv, gi) {
+        var yy = Math.round(yOf(gv)) + 0.5; ctx.beginPath(); ctx.moveTo(L, yy); ctx.lineTo(W - R, yy); ctx.stroke();
+        ctx.fillStyle = C.ink3; ctx.textAlign = 'right'; ctx.textBaseline = gi === 0 ? 'bottom' : gi === 2 ? 'top' : 'middle';
+        ctx.fillText(Math.abs(gv) >= 100 ? gv.toFixed(0) : gv.toFixed(1), L - 6, yy);
+      });
+      if (mn < 0 && mx > 0) { var yz = Math.round(yOf(0)) + 0.5; ctx.strokeStyle = C.base; ctx.beginPath(); ctx.moveTo(L, yz); ctx.lineTo(W - R, yz); ctx.stroke(); }
+      ctx.setLineDash([3, 3]); ctx.strokeStyle = C.ink3;
+      [sim.tRelease, sim.tLand].forEach(function (tm) { if (tm > 0) { var xx = Math.round(xOf(tm)) + 0.5; ctx.beginPath(); ctx.moveTo(xx, y0); ctx.lineTo(xx, y1); ctx.stroke(); } });
+      ctx.setLineDash([]);
+      ctx.strokeStyle = s.col; ctx.lineWidth = 1.6; ctx.lineJoin = 'round'; ctx.beginPath();
+      var prev = null;
+      for (i = 0; i < fr.length; i++) {
+        v = s.get(fr[i]); var xx = xOf(fr[i].t), yy = yOf(clamp(v, mn, mx));
+        if (prev === null || (s.wrap && Math.abs(v - prev) > 180)) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
+        prev = v;
+      }
+      ctx.stroke();
+      var cv = s.get({ om: cur.om, I: cur.I, tilt: cur.tilt });
+      var px = xOf(playT), py = yOf(clamp(cv, mn, mx));
+      ctx.fillStyle = s.col; ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#19191e'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.font = '500 11px "IBM Plex Sans KR", sans-serif'; ctx.fillStyle = C.ink2; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText(s.name, L + 4, y0 + 1);
+      ctx.font = '11px "IBM Plex Mono", monospace'; ctx.fillStyle = C.ink; ctx.textAlign = 'right';
+      ctx.fillText(cv.toFixed(1) + ' ' + s.unit, W - R - 4, y0 + 1);
+    });
+    var pxx = Math.round(xOf(playT)) + 0.5;
+    ctx.strokeStyle = C.accent; ctx.globalAlpha = 0.6; ctx.beginPath(); ctx.moveTo(pxx, T); ctx.lineTo(pxx, Hc - 18); ctx.stroke(); ctx.globalAlpha = 1;
+    ctx.fillStyle = C.ink3; ctx.textBaseline = 'top'; ctx.textAlign = 'center'; ctx.font = '10.5px "IBM Plex Sans KR", sans-serif';
+    ctx.fillText('0', L, Hc - 14); ctx.fillText(tEnd.toFixed(2) + ' s', W - R - 14, Hc - 14);
+    if (sim.tRelease > 0) ctx.fillText('릴리스', xOf(sim.tRelease), Hc - 14);
+    if (sim.tLand > 0) ctx.fillText('착지', xOf(sim.tLand), Hc - 14);
+  }
+
+  /* ================= heatmap sweep (fill × snap) ================= */
+  var hm = $('#heatmap'), hmCtx = hm.getContext('2d'), hmTip = $('#hmTip');
+  var FILLS = [], SNAPS = [];
+  for (var fq = 0; fq <= 1.0001; fq += 0.04) FILLS.push(+fq.toFixed(2));
+  for (var sq = 0; sq <= 20.001; sq += 0.5) SNAPS.push(+sq.toFixed(2));
+  var grid = null, gridBase = null, sweeping = false, optimal = null, hover = null, hmGeom = null;
+  var RAMP = ['#cde2fb', '#9ec5f4', '#6da7ec', '#3987e5', '#256abf', '#184f95', '#0d366b'];
+  function hexToRgb(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
+  var RAMP_RGB = RAMP.map(hexToRgb);
+  function rampColor(err) {
+    var t = Math.pow(clamp(err / 180, 0, 1), 0.55) * (RAMP.length - 1), i = Math.min(RAMP.length - 2, Math.floor(t)), u = t - i;
+    var a = RAMP_RGB[i], b = RAMP_RGB[i + 1];
+    return 'rgb(' + Math.round(lerp(a[0], b[0], u)) + ',' + Math.round(lerp(a[1], b[1], u)) + ',' + Math.round(lerp(a[2], b[2], u)) + ')';
+  }
+  function scheduleSweep() { clearTimeout(sweepTimer); sweepTimer = setTimeout(runSweep, 400); }
+  function runSweep() {
+    var base = { torque: P.torque, flickTime: P.flickTime, wristHeight: P.wristHeight, armSpeed: P.armSpeed, armAngle: P.armAngle, fill: 0, snap: 0 };
+    gridBase = base; grid = FILLS.map(function () { return null; }); optimal = null; sweeping = true;
+    $('#btnApplyOpt').disabled = true; $('#hmStat').textContent = '계산 중…';
+    var row = 0, token = {}; runSweep.token = token;
+    function chunk() {
+      if (runSweep.token !== token) return;
+      var t0 = performance.now();
+      while (row < FILLS.length && performance.now() - t0 < 24) { grid[row] = SNAPS.map(function (q) { return BF.evalCell(base, FILLS[row], q); }); row++; }
+      $('#hmProg').style.width = (row / FILLS.length * 100) + '%';
+      drawHeatmap();
+      if (row < FILLS.length) setTimeout(chunk, 0); else finishSweep();
+    }
+    setTimeout(chunk, 0);
+  }
+  function finishSweep() {
+    sweeping = false;
+    var best = null, nSucc = 0, r, c;
+    for (r = 0; r < FILLS.length; r++) for (c = 0; c < SNAPS.length; c++) {
+      var cell = grid[r][c]; if (!won(cell)) continue; nSucc++;
+      var cnt = 0, tot = 0;
+      for (var dr = -2; dr <= 2; dr++) for (var dc = -2; dc <= 2; dc++) { tot++; var rr = r + dr, cc = c + dc; if (rr < 0 || cc < 0 || rr >= FILLS.length || cc >= SNAPS.length) continue; if (won(grid[rr][cc])) cnt++; }
+      var score = cnt / tot - targetErr(cell.tilt) / 400;
+      if (!best || score > best.score) best = { r: r, c: c, score: score, robust: cnt / tot, cell: cell };
+    }
+    optimal = best;
+    $('#hmStat').textContent = FILLS.length * SNAPS.length + '회 시뮬레이션 · 성공 ' + nSucc + '칸';
+    var o = $('#opt');
+    if (best) {
+      o.innerHTML = '<span>★ 최적 <b class="num">물 ' + Math.round(best.cell.fill * 100) + '% · 힘 ' + best.cell.snap.toFixed(1) + ' N</b></span><span class="muted">주변 조건 성공률 ' + Math.round(best.robust * 100) + '% · 착지 오차 ' + targetErr(best.cell.tilt).toFixed(1) + '°</span>';
+      $('#btnApplyOpt').disabled = false;
+    } else o.innerHTML = '<span class="muted">이 스윙 조건으로는 ' + (mode === 'cap' ? '뚜껑으로 서는' : '서는') + ' 조합이 없습니다. 세부 설정을 바꿔 보세요.</span>';
+    setTimeout(function () { $('#hmProg').style.width = '0%'; }, 600);
+    drawHeatmap();
+  }
+  function drawHeatmap() {
+    var W = hm.clientWidth, Hc = hm.clientHeight, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (!W || !Hc) return;
+    if (hm.width !== Math.round(W * dpr) || hm.height !== Math.round(Hc * dpr)) { hm.width = Math.round(W * dpr); hm.height = Math.round(Hc * dpr); }
+    var ctx = hmCtx; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, Hc);
+    var L = 40, R = 6, T = 8, Bm = 30, pw = W - L - R, ph = Hc - T - Bm;
+    var cw = pw / SNAPS.length, ch = ph / FILLS.length;
+    hmGeom = { L: L, T: T, cw: cw, ch: ch, pw: pw, ph: ph };
+    var r, c;
+    for (r = 0; r < FILLS.length; r++) {
+      var y = T + ph - (r + 1) * ch;
+      for (c = 0; c < SNAPS.length; c++) {
+        var x = L + c * cw, cell = grid && grid[r] ? grid[r][c] : null;
+        ctx.fillStyle = cell ? rampColor(targetErr(cell.tilt)) : '#202027';
+        ctx.fillRect(x + 0.5, y + 0.5, cw - 1, ch - 1);
+        if (cell && won(cell)) { ctx.strokeStyle = '#0ca30c'; ctx.lineWidth = 2; ctx.strokeRect(x + 1.5, y + 1.5, cw - 3, ch - 3); }
+      }
+    }
+    ctx.font = '10.5px "IBM Plex Mono", monospace'; ctx.fillStyle = C.ink3; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    SNAPS.forEach(function (q, i) { if (Math.abs(q / 5 - Math.round(q / 5)) < 1e-6) ctx.fillText(q.toFixed(0), L + (i + 0.5) * cw, T + ph + 4); });
+    ctx.fillText('던지는 힘 (N)', L + pw / 2, T + ph + 16);
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    FILLS.forEach(function (f, i) { if (Math.round(f * 100) % 20 === 0) ctx.fillText(Math.round(f * 100) + '%', L - 5, T + ph - (i + 0.5) * ch); });
+    ctx.save(); ctx.translate(9, T + ph / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('물의 양', 0, 0); ctx.restore();
+    var ci = nearestIdx(SNAPS, P.snap), ri = nearestIdx(FILLS, P.fill);
+    ctx.strokeStyle = C.accent; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(L + (ci + 0.5) * cw, T + ph - (ri + 0.5) * ch, Math.min(cw, ch) * 0.42, 0, Math.PI * 2); ctx.stroke();
+    if (optimal) { ctx.fillStyle = '#ffffff'; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('★', L + (optimal.c + 0.5) * cw, T + ph - (optimal.r + 0.5) * ch + 0.5); }
+    if (hover) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.strokeRect(L + hover.c * cw + 0.5, T + ph - (hover.r + 1) * ch + 0.5, cw - 1, ch - 1); }
+  }
+  function nearestIdx(arr, v) { var bi = 0, bd = Infinity; for (var i = 0; i < arr.length; i++) { var d = Math.abs(arr[i] - v); if (d < bd) { bd = d; bi = i; } } return bi; }
+  function hmCell(ev) {
+    if (!hmGeom) return null;
+    var rect = hm.getBoundingClientRect(), x = ev.clientX - rect.left - hmGeom.L, y = ev.clientY - rect.top - hmGeom.T;
+    if (x < 0 || y < 0 || x >= hmGeom.pw || y >= hmGeom.ph) return null;
+    return { r: FILLS.length - 1 - Math.floor(y / hmGeom.ch), c: Math.floor(x / hmGeom.cw) };
+  }
+  hm.addEventListener('mousemove', function (ev) {
+    var h = hmCell(ev); hover = h;
+    if (h && grid && grid[h.r]) {
+      var cell = grid[h.r][h.c];
+      hmTip.style.display = 'block';
+      hmTip.innerHTML = '물 <b>' + Math.round(cell.fill * 100) + '%</b> · 힘 <b>' + cell.snap.toFixed(1) + '</b> N<br>착지 기울기 <b>' + cell.tilt.toFixed(1) + '°</b> · 회전 <b>' + (isNaN(cell.rotations) ? '–' : cell.rotations.toFixed(2)) + '</b>회 · ' + (won(cell) ? '<span class="t-good">' + (mode === 'cap' ? '뚜껑으로 섬' : '세워짐') + '</span>' : cell.outcome === 'upright' ? '<span class="t-mute">바닥으로 섬</span>' : cell.outcome === 'inverted' ? '<span class="t-mute">뚜껑으로 섬</span>' : '<span class="t-bad">넘어짐</span>');
+      var wrapRect = hm.parentNode.getBoundingClientRect();
+      var tx = ev.clientX - wrapRect.left + 14, ty = ev.clientY - wrapRect.top - 10;
+      if (tx + 210 > wrapRect.width) tx -= 224;
+      hmTip.style.left = tx + 'px'; hmTip.style.top = ty + 'px';
+    } else hmTip.style.display = 'none';
+    drawHeatmap();
+  });
+  hm.addEventListener('mouseleave', function () { hover = null; hmTip.style.display = 'none'; drawHeatmap(); });
+  function applyCell(cell) {
+    P.fill = cell.fill; P.snap = cell.snap;
+    if (gridBase) { P.torque = gridBase.torque; P.flickTime = gridBase.flickTime; P.wristHeight = gridBase.wristHeight; P.armSpeed = gridBase.armSpeed; P.armAngle = gridBase.armAngle; }
+    refreshAllSliders(); persist(); runSim(true); drawHeatmap();
+    $('#stage').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  hm.addEventListener('click', function (ev) { var h = hmCell(ev); if (!h || !grid || !grid[h.r]) return; applyCell(grid[h.r][h.c]); });
+  hm.style.cursor = 'pointer';
+  $('#btnSweep').addEventListener('click', runSweep);
+  $('#btnApplyOpt').addEventListener('click', function () { if (optimal) applyCell(optimal.cell); });
+  window.addEventListener('resize', function () { drawHeatmap(); });
+
+  /* ================= PWA: install prompt + offline cache (site build only) ================= */
+  (function pwa() {
+    if (document.documentElement.getAttribute('data-site') !== '1') return;
+    var btn = $('#btnInstall'), hint = $('#iosHint'), deferred = null;
+    var standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+    window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); deferred = e; if (!standalone) btn.classList.add('show'); });
+    btn.addEventListener('click', function () {
+      if (!deferred) return;
+      deferred.prompt();
+      deferred.userChoice.then(function () { deferred = null; btn.classList.remove('show'); });
+    });
+    window.addEventListener('appinstalled', function () { btn.classList.remove('show'); hint.classList.remove('show'); });
+    var isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) && !window.MSStream;
+    var dismissed = false; try { dismissed = localStorage.getItem('bottleflip.iosHint') === '1'; } catch (e) {}
+    if (isIOS && !standalone && !dismissed) hint.classList.add('show');
+    $('#iosHintClose').addEventListener('click', function () { hint.classList.remove('show'); try { localStorage.setItem('bottleflip.iosHint', '1'); } catch (e) {} });
+    if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+      window.addEventListener('load', function () { navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(function () {}); });
+    }
+  })();
+
+  /* ================= boot ================= */
+  refreshAllSliders();
+  Array.prototype.forEach.call($('#modeSeg').children, function (c) { c.classList.toggle('on', c.dataset.m === mode); });
+  setView(view);
+  runSim(true);
+  drawHeatmap();
+  setTimeout(runSweep, 300);
+})();
